@@ -1,0 +1,225 @@
+#! /bin/sh
+
+## script rawproc   
+
+## Bob Zavala me fecit.
+
+## This script is used to begin raw processing of NPOI data,
+## including file transfer from lynx to alex, to produce a 
+## constrictor file. It expects the system.config file to be
+## present in the directory this script is initiated from. 
+
+## It is based on the script of the same name which ran 
+## on old octans (RIP) at the NPOI site.
+
+# Set the required variables
+# rootword and rootword2 are used to identify the files 
+# produced as raw files or used in raw file processing. 
+rootword=`date +%Y-%m-%d`
+rootword2=`date +%Y-%m%d`
+yearr=`date +%Y`
+
+# Set location of rawfiles
+rawFileDir=/scr/bzavala/NPOI/rawProcessing/
+#date +%Y-%m%d"*" > ${rawFileDir}date.dat
+echo "yearr ="${yearr}
+# Set locations of IDL and OYSTER
+idlDir=/scr/bzavala/exelis/idl86/bin/
+oysterDir=/scr/bzavala/oyster/
+
+# cp getFiles.template to use in sftp batch mode
+cp ${rawFileDir}getFiles.template ${rawFileDir}getFiles
+
+# edit getFiles with ed. Note use of escape character \
+# so I can use / in  a directory path name. Otherwise 
+# ed considers / to be a special character.
+# Do not pass ${rootword2}* with mget as files created 
+# on previous Zulu day will get missed. I put mget * 
+# in getFiles.template to alleviate this bug.
+ed -s ${rawFileDir}getFiles << end0
+!echo "Starting ed editor"
+2 s/npoi/npoi\/${yearr}\/${rootword}
+,wq
+end0
+
+# get files via sftp
+sftp -b ${rawFileDir}getFiles bzavala@wasp
+
+# Next, uncompress any gzipped files and 
+# make sure fringeData files are present.
+# I must do current date and any previous zulu 
+# days as well. gunzip commands below avoid the need
+# for a complex handling of the calendar.
+
+echo "gunzip-ing fringeData files..."
+# echo "This may take a few minutes."
+
+gunzip -v ${rawFileDir}*fringe*.gz
+
+ls ${rawFileDir}*.fringeData > /dev/null
+if [ "$?" -ne 0 ]
+then
+  echo "********************************************************"
+  echo "No fringeData files present. Deleting files and Quitting"
+  echo "********************************************************"
+  rm ${rawFileDir}*align*
+  rm ${rawFileDir}*sid*
+  rm ${rawFileDir}*wasa*
+  rm ${rawFileDir}*obslog*
+  rm ${rawFileDir}*starlog*
+  rm ${rawFileDir}*obslist*
+  exit 
+fi
+
+# Fringe data files present, gunzip others and process the data
+
+echo "gunzip-ing other files..."
+# echo "This may take a few minutes."
+
+gunzip -v ${rawFileDir}*align*.gz
+gunzip -v ${rawFileDir}*sid*.gz
+gunzip -v ${rawFileDir}*wasa*.gz
+gunzip -v ${rawFileDir}*obslog*.gz
+gunzip -v ${rawFileDir}*starLog*.gz
+
+#
+# Now remove any fringeData files that consist of headers
+# only. test fringeData file size, if it is <= 201000 bytes
+# it is just a header--boot it.
+#
+ls -l ${rawFileDir}*.fringeData > ${rawFileDir}size.dat
+awk  '{if ($5 <= 201000){ 
+           {file = $9}  
+           {system("rm " $9)}
+                      } 
+      }' ${rawFileDir}size.dat
+
+
+# Now check if any files exceeded the 2.1G 32 bit size limit, 
+# if so advise user so this failure will be written in the email.
+awk  '{if ($5 > 2100000000){
+           {file = $9}
+           {system("echo FILE TOO BIG: " $9)}
+           {system("echo SCRIPT WILL FAIL!!!")}
+                      }
+      }' ${rawFileDir}size.dat
+
+# Now start raw processing
+# cd to rawFileDir, otherwise files get put in machine:~/
+cd ${rawFileDir}
+
+${idlDir}idl ${oysterDir}oisdr << end1
+rawlist
+quit
+end1
+
+# Get reference station from system.config and edit .par file
+
+grep Ref ${rawFileDir}system.config > ${rawFileDir}refstat.dat
+
+ed -s ${rawFileDir}refstat.dat << end2
+1 s/! //
+,wq
+end2
+
+# edit the par file with ed
+# We use r to read in text from refstat.dat AFTER line 13,
+# then delete the new line 15 which is the default reference 
+# station information
+
+ed -s ${rawFileDir}${rootword}.par << end3
+!echo "Changing RefStation"
+13 r refstat.dat
+15 d
+,wq
+end3
+echo "${rootword}.par file edited"
+
+# Run constrictor
+
+/scr/bzavala/constrictor/constrictor << end4
+@${rootword}.par
+/
+quit
+end4
+
+# Update the observation database.
+
+${idlDir}idl ${oysterDir}oisdr << end5
+obsbase,'${rootword}.con'
+quit
+end5
+
+# cleanup
+
+
+tar -cvzf ${rawFileDir}${rootword}.tar.gz  ${rawFileDir}${rootword}*lst \
+${rawFileDir}${rootword}*par ${rawFileDir}system.config ${rawFileDir}refstat.dat \
+${rawFileDir}size.dat ${rawFileDir}getFiles
+
+rm ${rawFileDir}*dir ${rawFileDir}*lst \
+${rawFileDir}${rootword}*par ${rawFileDir}refstat.dat ${rawFileDir}size.dat
+ 
+rm ${rawFileDir}*alignData
+rm ${rawFileDir}*fringeData
+rm ${rawFileDir}*sidData.?
+rm ${rawFileDir}*wasaTrack.?
+rm ${rawFileDir}*obslog
+rm ${rawFileDir}*starLog
+rm ${rawFileDir}*obslist
+rm ${rawFileDir}*sidPoint*
+
+# Now gzip the confile for sftp sending
+
+gzip -v ${rawFileDir}${rootword}.con
+
+# Transfer files to wasp
+
+cp ${rawFileDir}putFiles.template ${rawFileDir}putFiles
+
+ed -s ${rawFileDir}putFiles << end6
+!echo "Starting ed editor again"
+3 s/.con.gz/${rootword}.con.gz
+4 s/.con.gz/${rootword}.con.gz
+6 s/.tar.gz/${rootword}.tar.gz
+7 s/.tar.gz/${rootword}.tar.gz
+,wq
+end6
+
+sftp -b ${rawFileDir}putFiles bzavala@wasp
+
+### Stop sextans transfer effective 2017 Nov
+# Transfer files to sextans
+
+#cp ${rawFileDir}sftpSextans.template ${rawFileDir}sftpSextans
+
+#ed -s ${rawFileDir}sftpSextans << end7
+#!echo "Starting ed editor again."
+#2 s/put/put ${rootword}.con.gz
+#3 s/chmod 0644/chmod 0644 ${rootword}.con.gz
+#,wq
+#end7
+
+#sftp -b ${rawFileDir}sftpSextans bzavala@sextans.lowell.edu
+
+### Eventually set up a transfer to ftp-internal at NOFS
+
+# Now gunzip the confile. I don't really need to conserve 
+# space on medea and it saves me gunzipping later.
+
+gunzip -v ${rawFileDir}${rootword}.con.gz
+
+rm ${rawFileDir}${rootword}.tar.gz
+
+## Scan count not needed
+# Get the night's scan count and record it to the 
+# scan count file.
+
+# echo "Now do the scan count..."
+
+# ${rawFileDir}getScanCount
+
+# Inform user script ended
+echo "******************************************"
+echo "rawproc has ended"
+echo "******************************************"
